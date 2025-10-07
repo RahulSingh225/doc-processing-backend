@@ -15,10 +15,12 @@ executor = ThreadPoolExecutor(max_workers=config.MAX_WORKERS)
 redis_client = redis.from_url(config.REDIS_URL)
 pubsub = redis_client.pubsub()
 
-def sync_execute_operation(job_id: str, operation_name: str, inputs: Dict):
+async def execute_operation(job_id: str, operation_name: str, inputs: Dict):
+    """Async wrapper for operation execution."""
     try:
         op = OperationFactory.get(operation_name)
-        result = op.execute({'job_id': job_id, **inputs})  # Blocking call
+        # Run the async execute directly (no sync wrapper needed)
+        result = await op.execute({'job_id': job_id, **inputs})
         output_key = result['output_key']
         download_url = generate_presigned_url(output_key, 'get_object', 3600)
         redis_client.hset(f"job:{job_id}", mapping={
@@ -33,6 +35,7 @@ def sync_execute_operation(job_id: str, operation_name: str, inputs: Dict):
         redis_client.hset(f"job:{job_id}", "error", str(e))
         redis_client.publish("job_updates", json.dumps({"job_id": job_id, "status": "failed"}))
 
+        
 @app.get("/upload-url")
 async def get_upload_url(file_name: str):
     key = f"uploads/{file_name}"
@@ -50,9 +53,7 @@ async def process_document(request: ProcessRequest):
         "operation": request.operation,
         "inputs": json.dumps(inputs)
     })
-    asyncio.create_task(asyncio.get_event_loop().run_in_executor(
-        executor, sync_execute_operation, job_id, request.operation, inputs
-    ))
+    asyncio.create_task(execute_operation(job_id, request.operation, inputs))
     return {"job_id": job_id}
 
 @app.get("/status/{job_id}", response_model=StatusResponse)
@@ -65,6 +66,11 @@ async def get_status(job_id: str):
         download_url=data.get(b"download_url", None).decode() if b"download_url" in data else None,
         error=data.get(b"error", None).decode() if b"error" in data else None
     )
+
+@app.get("/debug-config")
+async def debug_config():
+    return {"s3_bucket": config.S3_BUCKET, "aws_access_key": config.AWS_ACCESS_KEY_ID[:4] + "..." if config.AWS_ACCESS_KEY_ID else None}
+
 
 # WebSocket for real-time updates
 @app.websocket("/ws")
